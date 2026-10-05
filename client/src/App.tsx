@@ -2,39 +2,48 @@ import { CallInterface } from "./components/CallInterface";
 import { useVoiceAgent } from "./hooks/useVoiceAgent";
 
 function App() {
-  const voiceAgent = useVoiceAgent();
+  const {
+    status,
+    transcript,
+    isMuted,
+    speaking,
+    language,
+    sessionTime,
+    connect,
+    disconnect,
+    toggleMute,
+    error,
+    clearError,
+  } = useVoiceAgent();
 
   return (
     <>
       <CallInterface
-        status={voiceAgent.status}
-        transcript={voiceAgent.transcript}
-        isMuted={voiceAgent.isMuted}
-        speaking={voiceAgent.speaking}
-        language={voiceAgent.language}
-        sessionTime={voiceAgent.sessionTime}
-        onStart={voiceAgent.connect}
-        onEnd={voiceAgent.disconnect}
-        onToggleMute={
-          voiceAgent.toggleMute
-        }
+        status={status}
+        transcript={transcript}
+        isMuted={isMuted}
+        speaking={speaking}
+        language={language}
+        sessionTime={sessionTime}
+        onStart={connect}
+        onEnd={disconnect}
+        onToggleMute={toggleMute}
       />
 
-      {voiceAgent.error && (
+      {error && (
         <div className="error-toast">
           <div>
             <strong>
               Connection problem
             </strong>
 
-            <p>
-              {voiceAgent.error}
-            </p>
+            <p>{error}</p>
           </div>
 
           <button
             type="button"
-            onClick={voiceAgent.clearError}
+            onClick={clearError}
+            aria-label="Close error"
           >
             ×
           </button>

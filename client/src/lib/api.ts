@@ -1,36 +1,47 @@
-import type { RealtimeTokenResponse } from "../types/voice";
+import type {
+  GeminiTokenResponse,
+} from "../types/voice";
 
 const API_URL =
-import.meta.env.VITE_API_URL ??"http://localhost:5000";
+  import.meta.env.VITE_API_URL ??
+  "http://localhost:5000";
 
-export async function getRealtimeToken(): Promise<string> {
-const response = await fetch(
-    `${API_URL}/api/realtime/token`,
+export async function getGeminiToken(): Promise<{
+  token: string;
+  model: string;
+}> {
+  const response = await fetch(
+    `${API_URL}/api/gemini/token`,
     {
-    method: "GET",
-    headers: {
+      method: "GET",
+      headers: {
         Accept: "application/json",
+      },
     },
-    },
-);
+  );
 
-if (!response.ok) {
+  if (!response.ok) {
     const body = await response.text();
 
     throw new Error(
-    `Token request failed: ${response.status} ${body}`,
+      `Gemini token request failed: ${response.status} ${body}`,
     );
-}
+  }
 
-const data =
-    (await response.json()) as RealtimeTokenResponse;
+  const data =
+    (await response.json()) as GeminiTokenResponse;
 
-if (!data.success || !data.clientSecret) {
+  if (!data.success || !data.token) {
     throw new Error(
-    data.message ??
-        "Realtime client secret was not returned.",
+      data.message ??
+        "Gemini token was not returned.",
     );
-}
+  }
 
-return data.clientSecret;
+  return {
+    token: data.token,
+    model:
+      data.model ??
+      "gemini-3.8-live",
+  };
 }

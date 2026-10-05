@@ -6,409 +6,320 @@ import {
 } from "react";
 
 import {
-  RealtimeSession,
-} from "@openai/agents/realtime";
+  GeminiLiveClient,
+} from "../lib/geminiLive";
 
-import { voiceAgent } from "../lib/agent";
-import { getRealtimeToken } from "../lib/api";
+import {
+  getGeminiToken,
+} from "../lib/api";
 
 import type {
   CallStatus,
   TranscriptMessage,
 } from "../types/voice";
 
-function createId() {
-  return `${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2)}`;
-}
-
 export function useVoiceAgent() {
-  const sessionRef =
-    useRef<RealtimeSession | null>(null);
-
   const [status, setStatus] =
     useState<CallStatus>("idle");
-
-  const [transcript, setTranscript] =
-    useState<TranscriptMessage[]>([]);
-
-  const [error, setError] =
-    useState<string | null>(null);
 
   const [isMuted, setIsMuted] =
     useState(false);
 
-  const [language, setLanguage] =
-    useState("Auto");
-
   const [speaking, setSpeaking] =
     useState(false);
+
+  const [language, setLanguage] =
+    useState("English");
 
   const [sessionTime, setSessionTime] =
     useState(0);
 
+  const [error, setError] =
+    useState<string | null>(null);
+
+  const [transcript, setTranscript] =
+    useState<TranscriptMessage[]>([]);
+
+  const clientRef =
+    useRef<GeminiLiveClient | null>(null);
+
   const timerRef =
-    useRef<ReturnType<typeof setInterval> | null>(
-      null,
+    useRef<number | null>(null);
+
+  const addTranscript =
+    useCallback(
+      (
+        role: "user" | "assistant",
+        text: string,
+      ) => {
+        if (!text.trim()) {
+          return;
+        }
+
+        setTranscript((previous) => [
+          ...previous,
+          {
+            id: crypto.randomUUID(),
+            role,
+            text,
+            timestamp: new Date(),
+          },
+        ]);
+      },
+      [],
     );
 
-  const resetTimer = useCallback(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-    }
+  const detectLanguage = useCallback(
+    (text: string) => {
+      const hindiCharacters =
+        /[\u0900-\u097F]/;
 
-    setSessionTime(0);
-  }, []);
-
-  const startTimer = useCallback(() => {
-    resetTimer();
-
-    timerRef.current = setInterval(() => {
-      setSessionTime((previous) => previous + 1);
-    }, 1000);
-  }, [resetTimer]);
-
-  const addTranscript = useCallback(
-    (
-      role: "user" | "assistant",
-      text: string,
-    ) => {
-      const cleanText = text.trim();
-
-      if (!cleanText) {
+      if (hindiCharacters.test(text)) {
+        setLanguage("Hindi");
         return;
       }
 
-      setTranscript((previous) => [
-        ...previous,
-        {
-          id: createId(),
-          role,
-          text: cleanText,
-          timestamp: new Date(),
-        },
-      ]);
+      const hinglishWords =
+        /\b(hai|haan|nahi|nahin|kya|kaise|aap|mera|mujhe|karna|karo|acha|achha|bhai|chahiye|batao|samjhao)\b/i;
+
+      if (hinglishWords.test(text)) {
+        setLanguage("Hinglish");
+        return;
+      }
+
+      setLanguage("English");
     },
     [],
   );
 
-  const connect = useCallback(async () => {
-    if (sessionRef.current) {
-      return;
+  const startTimer = useCallback(() => {
+    if (timerRef.current) {
+      window.clearInterval(
+        timerRef.current,
+      );
     }
 
-    try {
-      setError(null);
-      setStatus("connecting");
-      setTranscript([]);
+    setSessionTime(0);
 
-      const clientSecret =
-        await getRealtimeToken();
+    timerRef.current =
+      window.setInterval(() => {
+        setSessionTime(
+          (previous) =>
+            previous + 1,
+        );
+      }, 1000);
+  }, []);
 
-      const session = new RealtimeSession(
-        voiceAgent,
-        {
-          model: "gpt-realtime-2.1",
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) {
+      window.clearInterval(
+        timerRef.current,
+      );
 
-          config: {
-            audio: {
-              output: {
-                voice: "marin",
-              },
+      timerRef.current = null;
+    }
+  }, []);
+
+  const connect = useCallback(
+    async () => {
+      try {
+        setError(null);
+
+        setStatus("connecting");
+
+        setTranscript([]);
+
+        setSessionTime(0);
+
+        const {
+          token,
+          model,
+        } = await getGeminiToken();
+
+        const client =
+          new GeminiLiveClient({
+            onOpen: () => {
+              setStatus("listening");
+              startTimer();
             },
-          },
-        },
-      );
 
-      session.on(
-        "audio_start",
-        () => {
-          setSpeaking(true);
-          setStatus("speaking");
-        },
-      );
+            onClose: () => {
+              setStatus("ended");
+              setSpeaking(false);
+              stopTimer();
+            },
 
-      session.on(
-        "audio_stopped",
-        () => {
-          setSpeaking(false);
+            onError: (err) => {
+              console.error(
+                "Gemini Live error:",
+                err,
+              );
 
-          if (!isMuted) {
-            setStatus("listening");
-          }
-        },
-      );
+              setError(
+                err.message ||
+                  "Gemini Live connection failed.",
+              );
 
-      session.on(
-        "audio_interrupted",
-        () => {
-          setSpeaking(false);
+              setStatus("error");
 
-          if (!isMuted) {
-            setStatus("listening");
-          }
-        },
-      );
+              setSpeaking(false);
 
-      session.on(
-        "agent_start",
-        () => {
-          setStatus("thinking");
-        },
-      );
+              stopTimer();
+            },
 
-      session.on(
-        "agent_end",
-        () => {
-          if (!speaking && !isMuted) {
-            setStatus("listening");
-          }
-        },
-      );
-
-      session.on(
-        "history_updated",
-        (history) => {
-          const messages: TranscriptMessage[] = [];
-
-          for (const item of history) {
-            if (
-              item.type !== "message"
-            ) {
-              continue;
-            }
-
-            const role =
-              item.role === "user"
-                ? "user"
-                : "assistant";
-
-            const content = item.content;
-
-            if (!Array.isArray(content)) {
-              continue;
-            }
-
-            for (const part of content) {
-              if (
-                typeof part !== "object" ||
-                part === null
-              ) {
-                continue;
-              }
-
-              const record =
-                part as Record<string, unknown>;
-
-              const transcriptText =
-                typeof record.transcript ===
-                "string"
-                  ? record.transcript
-                  : typeof record.text ===
-                      "string"
-                    ? record.text
-                    : null;
-
-              if (transcriptText) {
-                messages.push({
-                  id: createId(),
-                  role,
-                  text: transcriptText,
-                  timestamp: new Date(),
-                });
-              }
-            }
-          }
-
-          if (messages.length > 0) {
-            setTranscript(messages);
-          }
-        },
-      );
-
-      session.on(
-        "transport_event",
-        (event) => {
-          const eventRecord =
-            event as Record<string, unknown>;
-
-          const eventType =
-            eventRecord.type;
-
-          if (
-            eventType ===
-            "conversation.item.input_audio_transcription.completed"
-          ) {
-            const transcriptText =
-              eventRecord.transcript;
-
-            if (
-              typeof transcriptText ===
-              "string"
-            ) {
+            onInputTranscript: (
+              text,
+            ) => {
               addTranscript(
                 "user",
-                transcriptText,
+                text,
               );
-            }
-          }
 
-          if (
-            eventType ===
-            "response.audio_transcript.done"
-          ) {
-            const transcriptText =
-              eventRecord.transcript;
+              detectLanguage(text);
 
-            if (
-              typeof transcriptText ===
-              "string"
-            ) {
+              setStatus("thinking");
+            },
+
+            onOutputTranscript: (
+              text,
+            ) => {
               addTranscript(
                 "assistant",
-                transcriptText,
+                text,
               );
-            }
-          }
-        },
-      );
+            },
 
-      session.on(
-        "error",
-        (event) => {
-          console.error(
-            "Realtime session error:",
-            event,
-          );
+            onAudioStart: () => {
+              setSpeaking(true);
+              setStatus("speaking");
+            },
 
-          setError(
-            "The voice connection encountered an error.",
-          );
+            onAudioEnd: () => {
+              setSpeaking(false);
+              setStatus("listening");
+            },
 
-          setStatus("error");
-        },
-      );
+            onInterrupted: () => {
+              setSpeaking(false);
+              setStatus("listening");
+            },
+          });
 
-      sessionRef.current = session;
+        clientRef.current =
+          client;
 
-      await session.connect({
-        apiKey: clientSecret,
-      });
+        await client.connect(
+          token,
+          model,
+        );
+      } catch (err) {
+        console.error(
+          "Connection error:",
+          err,
+        );
 
-      setStatus("connected");
-      setLanguage("Auto");
-      startTimer();
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Unable to connect to Gemini.";
 
-      window.setTimeout(() => {
-        if (!isMuted) {
-          setStatus("listening");
-        }
-      }, 500);
-    } catch (connectionError) {
-      console.error(
-        "Failed to connect:",
-        connectionError,
-      );
+        setError(message);
 
-      sessionRef.current?.close();
-      sessionRef.current = null;
+        setStatus("error");
 
-      setStatus("error");
+        setSpeaking(false);
 
-      setError(
-        connectionError instanceof Error
-          ? connectionError.message
-          : "Unable to start the voice call.",
-      );
-    }
-  }, [
-    addTranscript,
-    isMuted,
-    speaking,
-    startTimer,
-  ]);
+        stopTimer();
 
-  const disconnect = useCallback(() => {
-    setStatus("ending");
+        await clientRef.current?.disconnect();
 
-    try {
-      sessionRef.current?.close();
-    } catch (closeError) {
-      console.error(
-        "Error closing session:",
-        closeError,
-      );
-    }
-
-    sessionRef.current = null;
-
-    setSpeaking(false);
-    setIsMuted(false);
-
-    resetTimer();
-
-    setStatus("ended");
-  }, [resetTimer]);
-
-  const toggleMute = useCallback(() => {
-    const session = sessionRef.current;
-
-    if (!session) {
-      return;
-    }
-
-    const nextMuted = !isMuted;
-
-    try {
-      session.mute(nextMuted);
-
-      setIsMuted(nextMuted);
-
-      if (nextMuted) {
-        setStatus("muted");
-      } else {
-        setStatus("listening");
+        clientRef.current = null;
       }
-    } catch (muteError) {
-      console.error(
-        "Mute error:",
-        muteError,
-      );
-    }
-  }, [isMuted]);
+    },
+    [
+      addTranscript,
+      detectLanguage,
+      startTimer,
+      stopTimer,
+    ],
+  );
+
+  const disconnect = useCallback(
+    async () => {
+      setStatus("ending");
+
+      stopTimer();
+
+      await clientRef.current?.disconnect();
+
+      clientRef.current = null;
+
+      setIsMuted(false);
+
+      setSpeaking(false);
+
+      setStatus("ended");
+    },
+    [stopTimer],
+  );
+
+  const toggleMute = useCallback(
+    () => {
+      const client =
+        clientRef.current;
+
+      if (!client) {
+        return;
+      }
+
+      if (isMuted) {
+        client.unmute();
+
+        setIsMuted(false);
+
+        setStatus("listening");
+      } else {
+        client.mute();
+
+        setIsMuted(true);
+
+        setStatus("muted");
+      }
+    },
+    [isMuted],
+  );
+
+  const clearError = useCallback(
+    () => {
+      setError(null);
+
+      if (status === "error") {
+        setStatus("idle");
+      }
+    },
+    [status],
+  );
 
   useEffect(() => {
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
+      stopTimer();
 
-      sessionRef.current?.close();
+      clientRef.current?.disconnect();
     };
-  }, []);
-
-  const clearError = useCallback(() => {
-    setError(null);
-
-    if (status === "error") {
-      setStatus("idle");
-    }
-  }, [status]);
+  }, [stopTimer]);
 
   return {
-    connect,
-    disconnect,
-    toggleMute,
-
     status,
     transcript,
-    error,
-    clearError,
-
     isMuted,
     speaking,
     language,
     sessionTime,
+    error,
+
+    connect,
+    disconnect,
+    toggleMute,
+    clearError,
   };
 }

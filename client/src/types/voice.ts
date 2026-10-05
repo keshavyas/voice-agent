@@ -16,10 +16,3 @@ export interface TranscriptMessage {
   text: string;
   timestamp: Date;
 }
-
-export interface RealtimeTokenResponse {
-  success: boolean;
-  clientSecret?: string;
-  expiresAt?: number | null;
-  message?: string;
-}
