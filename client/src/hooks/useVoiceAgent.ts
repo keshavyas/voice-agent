@@ -19,252 +19,383 @@ import type {
 } from "../types/voice";
 
 export function useVoiceAgent() {
-  const [status, setStatus] =
-    useState<CallStatus>("idle");
+  const [
+    status,
+    setStatus,
+  ] =
+    useState<CallStatus>(
+      "idle",
+    );
 
-  const [isMuted, setIsMuted] =
+  const [
+    isMuted,
+    setIsMuted,
+  ] =
     useState(false);
 
-  const [speaking, setSpeaking] =
+  const [
+    speaking,
+    setSpeaking,
+  ] =
     useState(false);
 
-  const [language, setLanguage] =
+  const [
+    language,
+    setLanguage,
+  ] =
     useState("English");
 
-  const [sessionTime, setSessionTime] =
+  const [
+    sessionTime,
+    setSessionTime,
+  ] =
     useState(0);
 
-  const [error, setError] =
-    useState<string | null>(null);
+  const [
+    error,
+    setError,
+  ] =
+    useState<string | null>(
+      null,
+    );
 
-  const [transcript, setTranscript] =
-    useState<TranscriptMessage[]>([]);
+  const [
+    transcript,
+    setTranscript,
+  ] =
+    useState<
+      TranscriptMessage[]
+    >([]);
 
   const clientRef =
-    useRef<GeminiLiveClient | null>(null);
+    useRef<
+      GeminiLiveClient | null
+    >(null);
 
   const timerRef =
-    useRef<number | null>(null);
+    useRef<number | null>(
+      null,
+    );
 
   const addTranscript =
     useCallback(
       (
-        role: "user" | "assistant",
+        role:
+          | "user"
+          | "assistant",
         text: string,
       ) => {
-        if (!text.trim()) {
+        const clean =
+          text.trim();
+
+        if (!clean) {
           return;
         }
 
-        setTranscript((previous) => [
-          ...previous,
-          {
-            id: crypto.randomUUID(),
-            role,
-            text,
-            timestamp: new Date(),
-          },
-        ]);
+        setTranscript(
+          (previous) => [
+            ...previous,
+            {
+              id: crypto.randomUUID(),
+
+              role,
+
+              text: clean,
+
+              timestamp:
+                new Date(),
+            },
+          ],
+        );
       },
       [],
     );
 
-  const detectLanguage = useCallback(
-    (text: string) => {
-      const hindiCharacters =
-        /[\u0900-\u097F]/;
+  const detectLanguage =
+    useCallback(
+      (text: string) => {
+        if (
+          /[\u0900-\u097F]/.test(
+            text,
+          )
+        ) {
+          setLanguage("Hindi");
+          return;
+        }
 
-      if (hindiCharacters.test(text)) {
-        setLanguage("Hindi");
-        return;
-      }
+        const hinglishPattern =
+          /\b(hai|haan|nahi|nahin|kya|kaise|aap|mera|meri|mujhe|karna|karo|acha|achha|bhai|chahiye|batao|samjhao|kyu|kyon|wala|wali)\b/i;
 
-      const hinglishWords =
-        /\b(hai|haan|nahi|nahin|kya|kaise|aap|mera|mujhe|karna|karo|acha|achha|bhai|chahiye|batao|samjhao)\b/i;
+        if (
+          hinglishPattern.test(
+            text,
+          )
+        ) {
+          setLanguage(
+            "Hinglish",
+          );
 
-      if (hinglishWords.test(text)) {
-        setLanguage("Hinglish");
-        return;
-      }
+          return;
+        }
 
-      setLanguage("English");
-    },
-    [],
-  );
+        setLanguage("English");
+      },
+      [],
+    );
 
-  const startTimer = useCallback(() => {
-    if (timerRef.current) {
-      window.clearInterval(
-        timerRef.current,
-      );
-    }
-
-    setSessionTime(0);
-
-    timerRef.current =
-      window.setInterval(() => {
-        setSessionTime(
-          (previous) =>
-            previous + 1,
+  const startTimer =
+    useCallback(() => {
+      if (
+        timerRef.current
+      ) {
+        window.clearInterval(
+          timerRef.current,
         );
-      }, 1000);
-  }, []);
+      }
 
-  const stopTimer = useCallback(() => {
-    if (timerRef.current) {
-      window.clearInterval(
-        timerRef.current,
-      );
+      setSessionTime(0);
 
-      timerRef.current = null;
-    }
-  }, []);
+      timerRef.current =
+        window.setInterval(
+          () => {
+            setSessionTime(
+              (previous) =>
+                previous + 1,
+            );
+          },
+          1000,
+        );
+    }, []);
 
-  const connect = useCallback(
-    async () => {
-      try {
-        setError(null);
+  const stopTimer =
+    useCallback(() => {
+      if (
+        timerRef.current
+      ) {
+        window.clearInterval(
+          timerRef.current,
+        );
 
-        setStatus("connecting");
+        timerRef.current =
+          null;
+      }
+    }, []);
 
-        setTranscript([]);
+  const connect =
+    useCallback(
+      async () => {
+        try {
+          setError(null);
 
-        setSessionTime(0);
+          setStatus(
+            "connecting",
+          );
 
-        const {
-          token,
-          model,
-        } = await getGeminiToken();
+          setTranscript([]);
 
-        const client =
-          new GeminiLiveClient({
-            onOpen: () => {
-              setStatus("listening");
-              startTimer();
-            },
+          setSessionTime(0);
 
-            onClose: () => {
-              setStatus("ended");
-              setSpeaking(false);
-              stopTimer();
-            },
+          setSpeaking(false);
 
-            onError: (err) => {
-              console.error(
-                "Gemini Live error:",
+          setIsMuted(false);
+
+          const {
+            token,
+            model,
+          } =
+            await getGeminiToken();
+
+          const client =
+            new GeminiLiveClient({
+              onOpen: () => {
+                console.log(
+                  "NOVA CONNECTED",
+                );
+
+                setStatus(
+                  "listening",
+                );
+
+                startTimer();
+              },
+
+              onClose: () => {
+                console.log(
+                  "NOVA CLOSED",
+                );
+
+                setSpeaking(false);
+
+                setStatus(
+                  "ended",
+                );
+
+                stopTimer();
+              },
+
+              onError: (
                 err,
-              );
+              ) => {
+                console.error(
+                  "NOVA ERROR:",
+                  err,
+                );
 
-              setError(
-                err.message ||
-                  "Gemini Live connection failed.",
-              );
+                setError(
+                  err.message ||
+                    "Gemini Live connection failed.",
+                );
 
-              setStatus("error");
+                setStatus(
+                  "error",
+                );
 
-              setSpeaking(false);
+                setSpeaking(false);
 
-              stopTimer();
-            },
+                stopTimer();
+              },
 
-            onInputTranscript: (
-              text,
-            ) => {
-              addTranscript(
-                "user",
+              onInputTranscript: (
                 text,
-              );
+              ) => {
+                console.log(
+                  "USER:",
+                  text,
+                );
 
-              detectLanguage(text);
+                addTranscript(
+                  "user",
+                  text,
+                );
 
-              setStatus("thinking");
-            },
+                detectLanguage(
+                  text,
+                );
 
-            onOutputTranscript: (
-              text,
-            ) => {
-              addTranscript(
-                "assistant",
+                setStatus(
+                  "thinking",
+                );
+              },
+
+              onOutputTranscript: (
                 text,
-              );
-            },
+              ) => {
+                console.log(
+                  "NOVA:",
+                  text,
+                );
 
-            onAudioStart: () => {
-              setSpeaking(true);
-              setStatus("speaking");
-            },
+                addTranscript(
+                  "assistant",
+                  text,
+                );
+              },
 
-            onAudioEnd: () => {
-              setSpeaking(false);
-              setStatus("listening");
-            },
+              onAudioStart: () => {
+                console.log(
+                  "NOVA STARTED SPEAKING",
+                );
 
-            onInterrupted: () => {
-              setSpeaking(false);
-              setStatus("listening");
-            },
-          });
+                setSpeaking(true);
 
-        clientRef.current =
-          client;
+                setStatus(
+                  "speaking",
+                );
+              },
 
-        await client.connect(
-          token,
-          model,
+              onAudioEnd: () => {
+                console.log(
+                  "NOVA FINISHED SPEAKING",
+                );
+
+                setSpeaking(false);
+
+                setStatus(
+                  "listening",
+                );
+              },
+
+              onInterrupted: () => {
+                console.log(
+                  "NOVA INTERRUPTED",
+                );
+
+                setSpeaking(false);
+
+                setStatus(
+                  "listening",
+                );
+              },
+            });
+
+          clientRef.current =
+            client;
+
+          await client.connect(
+            token,
+            model,
+          );
+        } catch (err) {
+          console.error(
+            "Connection error:",
+            err,
+          );
+
+          const message =
+            err instanceof Error
+              ? err.message
+              : "Unable to connect to Gemini.";
+
+          setError(message);
+
+          setStatus(
+            "error",
+          );
+
+          setSpeaking(false);
+
+          stopTimer();
+
+          await clientRef.current?.disconnect();
+
+          clientRef.current = null;
+        }
+      },
+      [
+        addTranscript,
+        detectLanguage,
+        startTimer,
+        stopTimer,
+      ],
+    );
+
+  const disconnect =
+    useCallback(
+      async () => {
+        setStatus(
+          "ending",
         );
-      } catch (err) {
-        console.error(
-          "Connection error:",
-          err,
-        );
-
-        const message =
-          err instanceof Error
-            ? err.message
-            : "Unable to connect to Gemini.";
-
-        setError(message);
-
-        setStatus("error");
-
-        setSpeaking(false);
 
         stopTimer();
 
         await clientRef.current?.disconnect();
 
-        clientRef.current = null;
-      }
-    },
-    [
-      addTranscript,
-      detectLanguage,
-      startTimer,
-      stopTimer,
-    ],
-  );
+        clientRef.current =
+          null;
 
-  const disconnect = useCallback(
-    async () => {
-      setStatus("ending");
+        setIsMuted(false);
 
-      stopTimer();
+        setSpeaking(false);
 
-      await clientRef.current?.disconnect();
+        setStatus(
+          "ended",
+        );
+      },
+      [stopTimer],
+    );
 
-      clientRef.current = null;
-
-      setIsMuted(false);
-
-      setSpeaking(false);
-
-      setStatus("ended");
-    },
-    [stopTimer],
-  );
-
-  const toggleMute = useCallback(
-    () => {
+  const toggleMute =
+    useCallback(() => {
       const client =
         clientRef.current;
 
@@ -277,49 +408,58 @@ export function useVoiceAgent() {
 
         setIsMuted(false);
 
-        setStatus("listening");
+        setStatus(
+          "listening",
+        );
       } else {
         client.mute();
 
         setIsMuted(true);
 
-        setStatus("muted");
+        setStatus(
+          "muted",
+        );
       }
-    },
-    [isMuted],
-  );
+    }, [isMuted]);
 
-  const clearError = useCallback(
-    () => {
+  const clearError =
+    useCallback(() => {
       setError(null);
 
-      if (status === "error") {
-        setStatus("idle");
-      }
-    },
-    [status],
-  );
+      setStatus(
+        "idle",
+      );
+    }, []);
 
   useEffect(() => {
     return () => {
       stopTimer();
 
-      clientRef.current?.disconnect();
+      void clientRef.current?.disconnect();
     };
   }, [stopTimer]);
 
   return {
     status,
+
     transcript,
+
     isMuted,
+
     speaking,
+
     language,
+
     sessionTime,
+
     error,
 
     connect,
+
     disconnect,
+
     toggleMute,
+
     clearError,
   };
 }

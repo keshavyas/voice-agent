@@ -1,12 +1,19 @@
-import type { Request, Response } from "express";
-import { createGeminiLiveToken } from "../services/gemini.service.js";
+import type {
+  Request,
+  Response,
+} from "express";
+
+import {
+  createGeminiLiveToken,
+} from "../services/gemini.service.js";
 
 export async function createGeminiToken(
   _req: Request,
   res: Response,
 ) {
   try {
-    const result = await createGeminiLiveToken();
+    const result =
+      await createGeminiLiveToken();
 
     res.status(200).json({
       success: true,
@@ -21,6 +28,7 @@ export async function createGeminiToken(
 
     res.status(500).json({
       success: false,
+
       message:
         error instanceof Error
           ? error.message

@@ -1,5 +1,8 @@
 import { Router } from "express";
-import { createGeminiToken } from "../controller/gemini.controller.js";
+
+import {
+  createGeminiToken,
+} from "../controller/gemini.controller.js";
 
 const router = Router();
 

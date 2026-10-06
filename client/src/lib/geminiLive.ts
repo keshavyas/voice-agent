@@ -27,42 +27,31 @@ export interface GeminiLiveCallbacks {
   onInterrupted?: () => void;
 }
 
-function base64ToBytes(
-  base64: string,
-): Uint8Array {
-  const binary = atob(base64);
+const INPUT_SAMPLE_RATE = 16000;
 
-  const bytes = new Uint8Array(
-    binary.length,
-  );
-
-  for (
-    let i = 0;
-    i < binary.length;
-    i++
-  ) {
-    bytes[i] =
-      binary.charCodeAt(i);
-  }
-
-  return bytes;
-}
+const OUTPUT_SAMPLE_RATE = 24000;
 
 function float32ToPCM16(
   input: Float32Array,
 ): Int16Array {
   const output =
-    new Int16Array(input.length);
+    new Int16Array(
+      input.length,
+    );
 
   for (
     let i = 0;
     i < input.length;
     i++
   ) {
-    const sample = Math.max(
-      -1,
-      Math.min(1, input[i]),
-    );
+    const sample =
+      Math.max(
+        -1,
+        Math.min(
+          1,
+          input[i],
+        ),
+      );
 
     output[i] =
       sample < 0
@@ -76,11 +65,12 @@ function float32ToPCM16(
 function pcm16ToBase64(
   pcm: Int16Array,
 ): string {
-  const bytes = new Uint8Array(
-    pcm.buffer,
-    pcm.byteOffset,
-    pcm.byteLength,
-  );
+  const bytes =
+    new Uint8Array(
+      pcm.buffer,
+      pcm.byteOffset,
+      pcm.byteLength,
+    );
 
   let binary = "";
 
@@ -91,13 +81,14 @@ function pcm16ToBase64(
     i < bytes.length;
     i += chunkSize
   ) {
-    const chunk = bytes.subarray(
-      i,
-      Math.min(
-        i + chunkSize,
-        bytes.length,
-      ),
-    );
+    const chunk =
+      bytes.subarray(
+        i,
+        Math.min(
+          i + chunkSize,
+          bytes.length,
+        ),
+      );
 
     binary += String.fromCharCode(
       ...chunk,
@@ -107,36 +98,115 @@ function pcm16ToBase64(
   return btoa(binary);
 }
 
+function base64ToPCM16(
+  base64: string,
+): Int16Array {
+  const binary =
+    atob(base64);
+
+  const bytes =
+    new Uint8Array(
+      binary.length,
+    );
+
+  for (
+    let i = 0;
+    i < binary.length;
+    i++
+  ) {
+    bytes[i] =
+      binary.charCodeAt(i);
+  }
+
+  return new Int16Array(
+    bytes.buffer,
+  );
+}
+
+function resampleTo16k(
+  input: Float32Array,
+  inputSampleRate: number,
+): Float32Array {
+  if (
+    inputSampleRate ===
+    INPUT_SAMPLE_RATE
+  ) {
+    return input;
+  }
+
+  const ratio =
+    inputSampleRate /
+    INPUT_SAMPLE_RATE;
+
+  const outputLength =
+    Math.floor(
+      input.length / ratio,
+    );
+
+  const output =
+    new Float32Array(
+      outputLength,
+    );
+
+  for (
+    let i = 0;
+    i < outputLength;
+    i++
+  ) {
+    const position =
+      i * ratio;
+
+    const left =
+      Math.floor(position);
+
+    const right =
+      Math.min(
+        left + 1,
+        input.length - 1,
+      );
+
+    const fraction =
+      position - left;
+
+    output[i] =
+      input[left] *
+        (1 - fraction) +
+      input[right] *
+        fraction;
+  }
+
+  return output;
+}
+
 export class GeminiLiveClient {
   private session: any = null;
 
   private inputContext:
-    | AudioContext
-    | null = null;
+    AudioContext | null = null;
 
   private outputContext:
-    | AudioContext
-    | null = null;
+    AudioContext | null = null;
 
   private mediaStream:
-    | MediaStream
-    | null = null;
+    MediaStream | null = null;
 
   private source:
-    | MediaStreamAudioSourceNode
-    | null = null;
+    MediaStreamAudioSourceNode | null =
+      null;
 
   private processor:
-    | ScriptProcessorNode
-    | null = null;
+    ScriptProcessorNode | null =
+      null;
+
+  private silentGain:
+    GainNode | null = null;
+
+  private callbacks:
+    GeminiLiveCallbacks;
+
+  private stopped = true;
 
   private nextAudioTime = 0;
-
-  private callbacks: GeminiLiveCallbacks;
-
-  private stopped = false;
-
-  private hasReceivedAudio = false;
 
   constructor(
     callbacks: GeminiLiveCallbacks = {},
@@ -149,48 +219,40 @@ export class GeminiLiveClient {
     token: string,
     model: string,
   ) {
+    console.log(
+      "Connecting to Gemini Live...",
+    );
+
     this.stopped = false;
-    this.hasReceivedAudio = false;
-
-    console.log(
-      "🔵 Connecting to Gemini Live...",
-    );
-
-    console.log(
-      "Model:",
-      model,
-    );
-
-    const ai = new GoogleGenAI({
-      apiKey: token,
-    });
 
     /*
-     * OUTPUT AUDIO
+     * IMPORTANT:
+     * The ephemeral token is used as
+     * the API key for this Live session.
+     */
+    const ai =
+      new GoogleGenAI({
+        apiKey: token,
+      });
+
+    /*
+     * Create the output audio context.
      *
-     * Gemini Live returns raw
-     * 16-bit PCM at 24kHz.
+     * Do NOT force 24kHz here.
+     * The browser can use its native
+     * output sample rate and resample
+     * the AudioBuffer automatically.
      */
     this.outputContext =
       new AudioContext({
-        sampleRate: 24000,
+        latencyHint:
+          "interactive",
       });
 
-    if (
-      this.outputContext.state ===
-      "suspended"
-    ) {
-      await this.outputContext.resume();
-    }
+    await this.resumeAudio();
 
     this.nextAudioTime =
       this.outputContext.currentTime;
-
-    console.log(
-      "Output AudioContext:",
-      this.outputContext.state,
-      this.outputContext.sampleRate,
-    );
 
     this.session =
       await ai.live.connect({
@@ -201,41 +263,70 @@ export class GeminiLiveClient {
             Modality.AUDIO,
           ],
 
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: "Puck",
+              },
+            },
+          },
+
           inputAudioTranscription: {},
 
           outputAudioTranscription: {},
+
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              disabled: false,
+            },
+          },
 
           systemInstruction: {
             parts: [
               {
                 text: `
-You are Nova, a friendly real-time multilingual voice assistant.
+You are Nova.
 
-You are having a natural phone-style conversation.
+You are a natural human-like voice assistant.
 
-LANGUAGE RULES:
+Always respond naturally in the language currently being used by the user.
 
-1. If the user speaks English, respond in English.
-2. If the user speaks Hindi, respond in Hindi.
-3. If the user speaks Hinglish, respond naturally in Hinglish.
-4. If the user changes language, immediately switch.
-5. Never ask the user to choose a language.
+English -> English.
 
-CONVERSATION RULES:
+Hindi -> Hindi.
 
-- Answer naturally.
-- Keep spoken responses reasonably short.
-- Do not use markdown.
-- Do not say things like "Here is the answer".
-- Do not unnecessarily repeat the user's question.
-- Maintain conversation context.
-- Be friendly, natural and conversational.
-- You can ask follow-up questions when appropriate.
+Hinglish -> natural Hinglish.
 
-IMPORTANT:
+If the user changes language,
+immediately change with them.
 
-Always actually respond to the user's speech.
-Do not remain silent after understanding the user.
+Never ask them to select a language.
+
+Maintain conversation context.
+
+Understand short replies,
+interruptions,
+follow-up questions,
+casual speech,
+Hindi,
+English,
+and Hinglish.
+
+Be friendly,
+warm,
+natural,
+and conversational.
+
+Do not sound robotic.
+
+Keep normal voice responses concise.
+
+Do not use markdown in spoken responses.
+
+If the user asks something technical,
+give a clear technical explanation.
+
+You are Nova.
 `,
               },
             ],
@@ -245,50 +336,39 @@ Do not remain silent after understanding the user.
         callbacks: {
           onopen: () => {
             console.log(
-              "🟢 Gemini Live connected",
+              "Gemini Live connected",
             );
 
             this.callbacks.onOpen?.();
 
             /*
-             * IMPORTANT DEBUG TEST
+             * TEST GREETING
              *
-             * This sends text after connection.
-             *
-             * If Nova replies to this,
-             * Gemini connection + output audio
-             * are working and the remaining
-             * issue is microphone/VAD.
+             * This proves that the
+             * Gemini -> browser audio
+             * pipeline is working.
              */
-
             setTimeout(() => {
               if (
-                !this.session ||
-                this.stopped
+                !this.stopped &&
+                this.session
               ) {
-                return;
+                console.log(
+                  "Sending Nova startup greeting...",
+                );
+
+                this.session.sendRealtimeInput(
+                  {
+                    text: "Say a short friendly greeting to the user. Introduce yourself as Nova.",
+                  },
+                );
               }
-
-              console.log(
-                "🧪 Sending test message to Gemini...",
-              );
-
-              this.session.sendRealtimeInput(
-                {
-                  text: "Hello Nova, please say hello back.",
-                },
-              );
-            }, 500);
+            }, 300);
           },
 
           onmessage: (
             message: any,
           ) => {
-            console.log(
-              "📩 Gemini message:",
-              message,
-            );
-
             this.handleMessage(
               message,
             );
@@ -298,7 +378,7 @@ Do not remain silent after understanding the user.
             event: any,
           ) => {
             console.error(
-              "🔴 Gemini Live error:",
+              "Gemini Live error:",
               event,
             );
 
@@ -307,6 +387,7 @@ Do not remain silent after understanding the user.
                 ? event
                 : new Error(
                     event?.message ??
+                      event?.error?.message ??
                       "Gemini Live error.",
                   );
 
@@ -319,7 +400,7 @@ Do not remain silent after understanding the user.
             event: any,
           ) => {
             console.log(
-              "🟡 Gemini Live closed:",
+              "Gemini Live closed",
               event,
             );
 
@@ -329,15 +410,36 @@ Do not remain silent after understanding the user.
       });
 
     console.log(
-      "✅ Gemini session created",
+      "NOVA READY",
     );
 
     await this.startMicrophone();
   }
 
+  private async resumeAudio() {
+    if (
+      !this.outputContext
+    ) {
+      return;
+    }
+
+    if (
+      this.outputContext.state !==
+      "running"
+    ) {
+      await this.outputContext.resume();
+    }
+
+    console.log(
+      "Output AudioContext:",
+      this.outputContext.state,
+      this.outputContext.sampleRate,
+    );
+  }
+
   private async startMicrophone() {
     console.log(
-      "🎤 Requesting microphone...",
+      "Requesting microphone...",
     );
 
     this.mediaStream =
@@ -345,31 +447,48 @@ Do not remain silent after understanding the user.
         {
           audio: {
             channelCount: 1,
+
             echoCancellation: true,
+
             noiseSuppression: true,
+
             autoGainControl: true,
           },
+
+          video: false,
         },
       );
 
+    const track =
+      this.mediaStream.getAudioTracks()[0];
+
     console.log(
-      "🎤 Microphone permission granted",
+      "Microphone track:",
+      track.getSettings(),
     );
 
+    /*
+     * Use browser's native audio
+     * sample rate.
+     *
+     * We resample the chunks to
+     * 16kHz ourselves.
+     */
     this.inputContext =
       new AudioContext({
-        sampleRate: 16000,
+        latencyHint:
+          "interactive",
       });
 
     if (
-      this.inputContext.state ===
-      "suspended"
+      this.inputContext.state !==
+      "running"
     ) {
       await this.inputContext.resume();
     }
 
     console.log(
-      "🎤 Input AudioContext:",
+      "Input AudioContext:",
       this.inputContext.state,
       this.inputContext.sampleRate,
     );
@@ -386,74 +505,106 @@ Do not remain silent after understanding the user.
         1,
       );
 
-    this.processor.onaudioprocess =
-      (event) => {
-        if (
-          this.stopped ||
-          !this.session
-        ) {
-          return;
-        }
+    /*
+     * Prevent microphone audio
+     * from being played back directly.
+     */
+    this.silentGain =
+      this.inputContext.createGain();
 
-        const input =
-          event.inputBuffer.getChannelData(
-            0,
-          );
+    this.silentGain.gain.value = 0;
 
-        const pcm =
-          float32ToPCM16(
-            input,
-          );
+    this.processor.onaudioprocess = (
+      event,
+    ) => {
+      if (
+        this.stopped ||
+        !this.session
+      ) {
+        return;
+      }
 
-        const base64 =
-          pcm16ToBase64(
-            pcm,
-          );
+      const input =
+        event.inputBuffer.getChannelData(
+          0,
+        );
 
-        try {
-          this.session.sendRealtimeInput(
-            {
-              audio: {
-                data: base64,
-                mimeType:
-                  "audio/pcm;rate=16000",
-              },
-            },
-          );
-        } catch (error) {
-          console.error(
-            "❌ Failed to send audio:",
-            error,
-          );
-        }
-      };
+      /*
+       * Convert browser's actual
+       * sample rate to 16kHz.
+       */
+      const resampled =
+        resampleTo16k(
+          input,
+          this.inputContext
+            ?.sampleRate ??
+            48000,
+        );
+
+      const pcm =
+        float32ToPCM16(
+          resampled,
+        );
+
+      /*
+       * Log microphone energy
+       * occasionally.
+       */
+      let sum = 0;
+
+      for (
+        let i = 0;
+        i < input.length;
+        i++
+      ) {
+        sum +=
+          input[i] *
+          input[i];
+      }
+
+      const rms =
+        Math.sqrt(
+          sum / input.length,
+        );
+
+      if (
+        Math.random() < 0.01
+      ) {
+        console.log(
+          "Mic RMS:",
+          rms.toFixed(5),
+        );
+      }
+
+      const base64 =
+        pcm16ToBase64(pcm);
+
+      this.session.sendRealtimeInput(
+        {
+          audio: {
+            data: base64,
+
+            mimeType:
+              "audio/pcm;rate=16000",
+          },
+        },
+      );
+    };
 
     this.source.connect(
       this.processor,
     );
 
-    /*
-     * Keep ScriptProcessor alive.
-     *
-     * We don't want microphone audio
-     * to be audible to the user.
-     */
-
-    const silentGain =
-      this.inputContext.createGain();
-
-    silentGain.gain.value = 0;
-
     this.processor.connect(
-      silentGain,
+      this.silentGain,
     );
 
-    silentGain.connect(
+    this.silentGain.connect(
       this.inputContext.destination,
     );
 
     console.log(
-      "🎤 Microphone streaming started",
+      "Microphone started",
     );
   }
 
@@ -461,31 +612,25 @@ Do not remain silent after understanding the user.
     message: any,
   ) {
     console.log(
-      "📨 SERVER CONTENT:",
-      message?.serverContent,
+      "Gemini message:",
+      message,
     );
 
     const serverContent =
       message?.serverContent;
 
     if (!serverContent) {
-      console.log(
-        "ℹ️ Message without serverContent:",
-        message,
-      );
-
       return;
     }
 
     /*
-     * INTERRUPTION
+     * USER INTERRUPTED NOVA
      */
-
     if (
       serverContent.interrupted
     ) {
       console.log(
-        "⛔ Gemini response interrupted",
+        "User interrupted Nova",
       );
 
       this.stopAudioPlayback();
@@ -496,102 +641,86 @@ Do not remain silent after understanding the user.
     }
 
     /*
-     * USER TRANSCRIPTION
+     * USER TRANSCRIPT
      */
+    const inputTranscript =
+      serverContent
+        .inputTranscription
+        ?.text;
 
     if (
-      serverContent.inputTranscription
+      inputTranscript
     ) {
-      const text =
-        serverContent
-          .inputTranscription.text;
-
       console.log(
-        "👤 USER:",
-        text,
+        "USER:",
+        inputTranscript,
       );
 
-      if (text) {
-        this.callbacks.onInputTranscript?.(
-          text,
-        );
-      }
+      this.callbacks.onInputTranscript?.(
+        inputTranscript,
+      );
     }
 
     /*
-     * GEMINI OUTPUT TRANSCRIPTION
+     * NOVA TRANSCRIPT
      */
+    const outputTranscript =
+      serverContent
+        .outputTranscription
+        ?.text;
 
     if (
-      serverContent.outputTranscription
+      outputTranscript
     ) {
-      const text =
-        serverContent
-          .outputTranscription.text;
-
       console.log(
-        "🤖 NOVA:",
-        text,
+        "NOVA:",
+        outputTranscript,
       );
 
-      if (text) {
-        this.callbacks.onOutputTranscript?.(
-          text,
-        );
-      }
+      this.callbacks.onOutputTranscript?.(
+        outputTranscript,
+      );
     }
 
     /*
-     * GEMINI AUDIO
+     * MODEL AUDIO
      */
-
     const parts =
       serverContent.modelTurn
         ?.parts;
 
-    if (
-      parts &&
-      parts.length > 0
-    ) {
-      console.log(
-        "🔊 Model parts:",
-        parts,
-      );
-
-      for (const part of parts) {
-        const base64Audio =
+    if (parts) {
+      for (
+        const part of parts
+      ) {
+        const audioData =
           part?.inlineData?.data;
 
-        if (!base64Audio) {
-          continue;
+        if (
+          audioData
+        ) {
+          console.log(
+            "🔊 NOVA AUDIO RECEIVED:",
+            audioData.length,
+          );
+
+          this.callbacks.onAudioStart?.();
+
+          this.playAudio(
+            audioData,
+          );
         }
-
-        console.log(
-          "🔊 Received Gemini audio:",
-          base64Audio.length,
-          "bytes(base64)",
-        );
-
-        this.hasReceivedAudio =
-          true;
-
-        this.callbacks.onAudioStart?.();
-
-        this.playAudio(
-          base64Audio,
-        );
       }
     }
 
     /*
-     * TURN COMPLETE
+     * END OF NOVA TURN
      */
-
     if (
       serverContent.turnComplete
     ) {
       console.log(
-        "✅ Gemini turn complete",
+        "Nova turn complete",
       );
 
       this.callbacks.onAudioEnd?.();
@@ -601,55 +730,38 @@ Do not remain silent after understanding the user.
   private async playAudio(
     base64Audio: string,
   ) {
-    if (!this.outputContext) {
-      console.warn(
-        "⚠️ No output AudioContext",
+    if (
+      !this.outputContext
+    ) {
+      console.error(
+        "No output AudioContext",
       );
 
       return;
     }
 
-    if (
-      this.outputContext.state ===
-      "suspended"
-    ) {
-      await this.outputContext.resume();
-    }
+    /*
+     * Make absolutely sure
+     * the browser is playing audio.
+     */
+    await this.resumeAudio();
 
-    const bytes =
-      base64ToBytes(
+    const pcm =
+      base64ToPCM16(
         base64Audio,
       );
 
-    /*
-     * Gemini audio is:
-     *
-     * 16-bit
-     * little endian
-     * mono
-     * 24kHz
-     */
-
     if (
-      bytes.byteLength < 2
+      pcm.length === 0
     ) {
       return;
     }
-
-    const pcm =
-      new Int16Array(
-        bytes.buffer,
-        bytes.byteOffset,
-        Math.floor(
-          bytes.byteLength / 2,
-        ),
-      );
 
     const audioBuffer =
       this.outputContext.createBuffer(
         1,
         pcm.length,
-        24000,
+        OUTPUT_SAMPLE_RATE,
       );
 
     const channel =
@@ -675,24 +787,28 @@ Do not remain silent after understanding the user.
     const gain =
       this.outputContext.createGain();
 
-    gain.gain.value = 1;
+    gain.gain.value = 1.0;
 
-    source.connect(
-      gain,
-    );
+    source.connect(gain);
 
     gain.connect(
       this.outputContext.destination,
     );
 
-    const currentTime =
+    const now =
       this.outputContext.currentTime;
 
-    this.nextAudioTime =
-      Math.max(
-        this.nextAudioTime,
-        currentTime,
-      );
+    /*
+     * If the queue fell behind,
+     * start immediately.
+     */
+    if (
+      this.nextAudioTime <
+      now
+    ) {
+      this.nextAudioTime =
+        now + 0.02;
+    }
 
     source.start(
       this.nextAudioTime,
@@ -702,59 +818,88 @@ Do not remain silent after understanding the user.
       audioBuffer.duration;
 
     console.log(
-      "🔊 Playing Gemini audio:",
-      audioBuffer.duration,
-      "seconds",
+      "🔊 Playing Nova audio",
+      {
+        samples: pcm.length,
+        duration:
+          audioBuffer.duration,
+        context:
+          this.outputContext.state,
+      },
     );
   }
 
   private stopAudioPlayback() {
-    if (!this.outputContext) {
+    if (
+      !this.outputContext
+    ) {
       return;
     }
 
     this.nextAudioTime =
       this.outputContext.currentTime;
+
+    console.log(
+      "Nova audio playback stopped",
+    );
   }
 
   mute() {
-    if (!this.mediaStream) {
+    if (
+      !this.mediaStream
+    ) {
       return;
     }
 
-    this.mediaStream
-      .getAudioTracks()
-      .forEach(
-        (track) => {
-          track.enabled = false;
-        },
-      );
+    for (
+      const track of
+      this.mediaStream.getAudioTracks()
+    ) {
+      track.enabled = false;
+    }
+
+    console.log(
+      "Microphone muted",
+    );
   }
 
   unmute() {
-    if (!this.mediaStream) {
+    if (
+      !this.mediaStream
+    ) {
       return;
     }
 
-    this.mediaStream
-      .getAudioTracks()
-      .forEach(
-        (track) => {
-          track.enabled = true;
-        },
-      );
+    for (
+      const track of
+      this.mediaStream.getAudioTracks()
+    ) {
+      track.enabled = true;
+    }
+
+    console.log(
+      "Microphone unmuted",
+    );
   }
 
   async disconnect() {
     console.log(
-      "🔴 Disconnecting Gemini...",
+      "Disconnecting Nova...",
     );
 
     this.stopped = true;
 
-    this.processor?.disconnect();
+    try {
+      this.processor?.disconnect();
+    } catch {}
 
-    this.source?.disconnect();
+    try {
+      this.source?.disconnect();
+    } catch {}
+
+    try {
+      this.silentGain?.disconnect();
+    } catch {}
 
     this.mediaStream
       ?.getTracks()
@@ -780,13 +925,26 @@ Do not remain silent after understanding the user.
       await this.outputContext.close();
     }
 
-    this.session?.close();
+    try {
+      this.session?.close();
+    } catch {}
 
     this.processor = null;
+
     this.source = null;
+
+    this.silentGain = null;
+
     this.mediaStream = null;
+
     this.inputContext = null;
+
     this.outputContext = null;
+
     this.session = null;
+
+    console.log(
+      "Nova disconnected",
+    );
   }
 }
