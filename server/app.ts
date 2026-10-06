@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 
 import { env } from "./src/config/env.js";
+
 import geminiRoutes from "./src/routes/gemini.routes.js";
 
 const app = express();
@@ -15,12 +16,16 @@ app.use(
 
 app.use(express.json());
 
-app.get("/api/health", (_req, res) => {
-  res.status(200).json({
-    success: true,
-    message: "Voice Agent API is running.",
-  });
-});
+app.get(
+  "/api/health",
+  (_req, res) => {
+    res.status(200).json({
+      success: true,
+      message:
+        "Voice Agent API is running.",
+    });
+  },
+);
 
 app.use(
   "/api/gemini",
@@ -47,7 +52,8 @@ app.use(
 
     res.status(500).json({
       success: false,
-      message: "Internal server error.",
+      message:
+        "Internal server error.",
     });
   },
 );

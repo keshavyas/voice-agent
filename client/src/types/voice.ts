@@ -12,7 +12,22 @@ export type CallStatus =
 
 export interface TranscriptMessage {
   id: string;
-  role: "user" | "assistant";
+
+  role:
+    | "user"
+    | "assistant";
+
   text: string;
+
   timestamp: Date;
+}
+
+export interface GeminiTokenResponse {
+  success: boolean;
+
+  token?: string;
+
+  model?: string;
+
+  message?: string;
 }
