@@ -6,613 +6,325 @@ import {
 export interface GeminiLiveCallbacks {
   onOpen?: () => void;
 
-  onClose?: () => void;
+  onMessage?: (message: any) => void;
 
-  onError?: (
-    error: Error,
-  ) => void;
+  onError?: (error: unknown) => void;
 
-  onInputTranscript?: (
-    text: string,
-  ) => void;
+  onClose?: (event: CloseEvent) => void;
 
-  onOutputTranscript?: (
-    text: string,
-  ) => void;
+  onUserTranscript?: (text: string) => void;
 
-  onAudioStart?: () => void;
+  onAssistantTranscript?: (text: string) => void;
 
-  onAudioEnd?: () => void;
+  onAudio?: (base64Audio: string) => void;
 
   onInterrupted?: () => void;
-}
 
-const INPUT_SAMPLE_RATE = 16000;
-
-const OUTPUT_SAMPLE_RATE = 24000;
-
-function float32ToPCM16(
-  input: Float32Array,
-): Int16Array {
-  const output =
-    new Int16Array(
-      input.length,
-    );
-
-  for (
-    let i = 0;
-    i < input.length;
-    i++
-  ) {
-    const sample =
-      Math.max(
-        -1,
-        Math.min(
-          1,
-          input[i],
-        ),
-      );
-
-    output[i] =
-      sample < 0
-        ? sample * 0x8000
-        : sample * 0x7fff;
-  }
-
-  return output;
-}
-
-function pcm16ToBase64(
-  pcm: Int16Array,
-): string {
-  const bytes =
-    new Uint8Array(
-      pcm.buffer,
-      pcm.byteOffset,
-      pcm.byteLength,
-    );
-
-  let binary = "";
-
-  const chunkSize = 0x8000;
-
-  for (
-    let i = 0;
-    i < bytes.length;
-    i += chunkSize
-  ) {
-    const chunk =
-      bytes.subarray(
-        i,
-        Math.min(
-          i + chunkSize,
-          bytes.length,
-        ),
-      );
-
-    binary += String.fromCharCode(
-      ...chunk,
-    );
-  }
-
-  return btoa(binary);
-}
-
-function base64ToPCM16(
-  base64: string,
-): Int16Array {
-  const binary =
-    atob(base64);
-
-  const bytes =
-    new Uint8Array(
-      binary.length,
-    );
-
-  for (
-    let i = 0;
-    i < binary.length;
-    i++
-  ) {
-    bytes[i] =
-      binary.charCodeAt(i);
-  }
-
-  return new Int16Array(
-    bytes.buffer,
-  );
-}
-
-function resampleTo16k(
-  input: Float32Array,
-  inputSampleRate: number,
-): Float32Array {
-  if (
-    inputSampleRate ===
-    INPUT_SAMPLE_RATE
-  ) {
-    return input;
-  }
-
-  const ratio =
-    inputSampleRate /
-    INPUT_SAMPLE_RATE;
-
-  const outputLength =
-    Math.floor(
-      input.length / ratio,
-    );
-
-  const output =
-    new Float32Array(
-      outputLength,
-    );
-
-  for (
-    let i = 0;
-    i < outputLength;
-    i++
-  ) {
-    const position =
-      i * ratio;
-
-    const left =
-      Math.floor(position);
-
-    const right =
-      Math.min(
-        left + 1,
-        input.length - 1,
-      );
-
-    const fraction =
-      position - left;
-
-    output[i] =
-      input[left] *
-        (1 - fraction) +
-      input[right] *
-        fraction;
-  }
-
-  return output;
+  onTurnComplete?: () => void;
 }
 
 export class GeminiLiveClient {
   private session: any = null;
 
-  private inputContext:
-    AudioContext | null = null;
+  private inputAudioContext: AudioContext | null =
+    null;
 
-  private outputContext:
-    AudioContext | null = null;
+  private outputAudioContext: AudioContext | null =
+    null;
 
-  private mediaStream:
-    MediaStream | null = null;
+  private mediaStream: MediaStream | null =
+    null;
 
-  private source:
-    MediaStreamAudioSourceNode | null =
-      null;
+  private mediaSource:
+    | MediaStreamAudioSourceNode
+    | null = null;
 
   private processor:
-    ScriptProcessorNode | null =
-      null;
+    | ScriptProcessorNode
+    | null = null;
 
   private silentGain:
-    GainNode | null = null;
+    | GainNode
+    | null = null;
 
-  private callbacks:
-    GeminiLiveCallbacks;
+  /**
+   * True only while Gemini WebSocket
+   * is actually connected.
+   */
+  private connected = false;
 
-  private stopped = true;
+  /**
+   * Prevents multiple simultaneous
+   * connect() calls.
+   */
+  private connecting = false;
 
-  private nextAudioTime = 0;
+  /**
+   * Prevents audio from being sent
+   * while disconnecting.
+   */
+  private disconnecting = false;
+
+  /**
+   * Used for scheduling Gemini's
+   * 24kHz audio output.
+   */
+  private outputNextTime = 0;
+
+  /**
+   * Currently playing audio sources.
+   */
+  private audioQueue: AudioBufferSourceNode[] =
+    [];
+
+  private callbacks: GeminiLiveCallbacks;
 
   constructor(
     callbacks: GeminiLiveCallbacks = {},
   ) {
-    this.callbacks =
-      callbacks;
+    this.callbacks = callbacks;
   }
+
+  // ============================================================
+  // CONNECT
+  // ============================================================
 
   async connect(
     token: string,
     model: string,
-  ) {
-    console.log(
-      "Connecting to Gemini Live...",
-    );
-
-    this.stopped = false;
-
-    /*
+  ): Promise<void> {
+    /**
      * IMPORTANT:
-     * The ephemeral token is used as
-     * the API key for this Live session.
+     * Do not create another WebSocket
+     * if one already exists.
      */
-    const ai =
-      new GoogleGenAI({
-        apiKey: token,
-      });
-
-    /*
-     * Create the output audio context.
-     *
-     * Do NOT force 24kHz here.
-     * The browser can use its native
-     * output sample rate and resample
-     * the AudioBuffer automatically.
-     */
-    this.outputContext =
-      new AudioContext({
-        latencyHint:
-          "interactive",
-      });
-
-    await this.resumeAudio();
-
-    this.nextAudioTime =
-      this.outputContext.currentTime;
-
-    this.session =
-      await ai.live.connect({
-        model,
-
-        config: {
-          responseModalities: [
-            Modality.AUDIO,
-          ],
-
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: "Puck",
-              },
-            },
-          },
-
-          inputAudioTranscription: {},
-
-          outputAudioTranscription: {},
-
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              disabled: false,
-            },
-          },
-
-          systemInstruction: {
-            parts: [
-              {
-                text: `
-You are Nova.
-
-You are a natural human-like voice assistant.
-
-Always respond naturally in the language currently being used by the user.
-
-English -> English.
-
-Hindi -> Hindi.
-
-Hinglish -> natural Hinglish.
-
-If the user changes language,
-immediately change with them.
-
-Never ask them to select a language.
-
-Maintain conversation context.
-
-Understand short replies,
-interruptions,
-follow-up questions,
-casual speech,
-Hindi,
-English,
-and Hinglish.
-
-Be friendly,
-warm,
-natural,
-and conversational.
-
-Do not sound robotic.
-
-Keep normal voice responses concise.
-
-Do not use markdown in spoken responses.
-
-If the user asks something technical,
-give a clear technical explanation.
-
-You are Nova.
-`,
-              },
-            ],
-          },
-        },
-
-        callbacks: {
-          onopen: () => {
-            console.log(
-              "Gemini Live connected",
-            );
-
-            this.callbacks.onOpen?.();
-
-            /*
-             * TEST GREETING
-             *
-             * This proves that the
-             * Gemini -> browser audio
-             * pipeline is working.
-             */
-            setTimeout(() => {
-              if (
-                !this.stopped &&
-                this.session
-              ) {
-                console.log(
-                  "Sending Nova startup greeting...",
-                );
-
-                this.session.sendRealtimeInput(
-                  {
-                    text: "Say a short friendly greeting to the user. Introduce yourself as Nova.",
-                  },
-                );
-              }
-            }, 300);
-          },
-
-          onmessage: (
-            message: any,
-          ) => {
-            this.handleMessage(
-              message,
-            );
-          },
-
-          onerror: (
-            event: any,
-          ) => {
-            console.error(
-              "Gemini Live error:",
-              event,
-            );
-
-            const error =
-              event instanceof Error
-                ? event
-                : new Error(
-                    event?.message ??
-                      event?.error?.message ??
-                      "Gemini Live error.",
-                  );
-
-            this.callbacks.onError?.(
-              error,
-            );
-          },
-
-          onclose: (
-            event: any,
-          ) => {
-            console.log(
-              "Gemini Live closed",
-              event,
-            );
-
-            this.callbacks.onClose?.();
-          },
-        },
-      });
-
-    console.log(
-      "NOVA READY",
-    );
-
-    await this.startMicrophone();
-  }
-
-  private async resumeAudio() {
     if (
-      !this.outputContext
+      this.connected ||
+      this.connecting
     ) {
+      console.warn(
+        "Gemini Live is already connected or connecting.",
+      );
+
       return;
     }
 
-    if (
-      this.outputContext.state !==
-      "running"
-    ) {
-      await this.outputContext.resume();
-    }
+    this.connecting = true;
+    this.disconnecting = false;
 
-    console.log(
-      "Output AudioContext:",
-      this.outputContext.state,
-      this.outputContext.sampleRate,
-    );
-  }
-
-  private async startMicrophone() {
-    console.log(
-      "Requesting microphone...",
-    );
-
-    this.mediaStream =
-      await navigator.mediaDevices.getUserMedia(
-        {
-          audio: {
-            channelCount: 1,
-
-            echoCancellation: true,
-
-            noiseSuppression: true,
-
-            autoGainControl: true,
-          },
-
-          video: false,
-        },
+    try {
+      console.log(
+        "Connecting to Gemini Live...",
       );
 
-    const track =
-      this.mediaStream.getAudioTracks()[0];
-
-    console.log(
-      "Microphone track:",
-      track.getSettings(),
-    );
-
-    /*
-     * Use browser's native audio
-     * sample rate.
-     *
-     * We resample the chunks to
-     * 16kHz ourselves.
-     */
-    this.inputContext =
-      new AudioContext({
-        latencyHint:
-          "interactive",
+      /**
+       * The ephemeral Gemini token is used
+       * exactly like an API key on the client.
+       */
+      const ai = new GoogleGenAI({
+        apiKey: token,
       });
 
-    if (
-      this.inputContext.state !==
-      "running"
-    ) {
-      await this.inputContext.resume();
-    }
+      const session =
+        await ai.live.connect({
+          model,
 
-    console.log(
-      "Input AudioContext:",
-      this.inputContext.state,
-      this.inputContext.sampleRate,
-    );
+          callbacks: {
+            // --------------------------------------------------
+            // SOCKET OPENED
+            // --------------------------------------------------
 
-    this.source =
-      this.inputContext.createMediaStreamSource(
-        this.mediaStream,
-      );
+            onopen: () => {
+              console.log(
+                "🟢 Gemini Live WebSocket opened.",
+              );
 
-    this.processor =
-      this.inputContext.createScriptProcessor(
-        4096,
-        1,
-        1,
-      );
+              this.connected = true;
+              this.connecting = false;
+              this.disconnecting = false;
 
-    /*
-     * Prevent microphone audio
-     * from being played back directly.
-     */
-    this.silentGain =
-      this.inputContext.createGain();
+              this.callbacks.onOpen?.();
+            },
 
-    this.silentGain.gain.value = 0;
+            // --------------------------------------------------
+            // MESSAGE RECEIVED
+            // --------------------------------------------------
 
-    this.processor.onaudioprocess = (
-      event,
-    ) => {
-      if (
-        this.stopped ||
-        !this.session
-      ) {
-        return;
-      }
+            onmessage: (message: any) => {
+              this.handleMessage(message);
+            },
 
-      const input =
-        event.inputBuffer.getChannelData(
-          0,
-        );
+            // --------------------------------------------------
+            // SOCKET ERROR
+            // --------------------------------------------------
 
-      /*
-       * Convert browser's actual
-       * sample rate to 16kHz.
-       */
-      const resampled =
-        resampleTo16k(
-          input,
-          this.inputContext
-            ?.sampleRate ??
-            48000,
-        );
+            onerror: (event: ErrorEvent) => {
+              console.error(
+                "🔴 Gemini Live WebSocket error:",
+                event,
+              );
 
-      const pcm =
-        float32ToPCM16(
-          resampled,
-        );
+              console.error(
+                "WebSocket error message:",
+                event.message,
+              );
 
-      /*
-       * Log microphone energy
-       * occasionally.
-       */
-      let sum = 0;
+              this.callbacks.onError?.(
+                event,
+              );
+            },
 
-      for (
-        let i = 0;
-        i < input.length;
-        i++
-      ) {
-        sum +=
-          input[i] *
-          input[i];
-      }
+            // --------------------------------------------------
+            // SOCKET CLOSED
+            // --------------------------------------------------
 
-      const rms =
-        Math.sqrt(
-          sum / input.length,
-        );
+            onclose: (event: CloseEvent) => {
+              console.warn(
+                "🟡 Gemini Live WebSocket closed.",
+              );
 
-      if (
-        Math.random() < 0.01
-      ) {
-        console.log(
-          "Mic RMS:",
-          rms.toFixed(5),
-        );
-      }
+              console.log(
+                "Close code:",
+                event.code,
+              );
 
-      const base64 =
-        pcm16ToBase64(pcm);
+              console.log(
+                "Close reason:",
+                event.reason,
+              );
 
-      this.session.sendRealtimeInput(
-        {
-          audio: {
-            data: base64,
+              console.log(
+                "Was clean:",
+                event.wasClean,
+              );
 
-            mimeType:
-              "audio/pcm;rate=16000",
+              /**
+               * CRITICAL:
+               *
+               * Once Gemini closes the socket,
+               * immediately mark the session as
+               * disconnected.
+               */
+              this.connected = false;
+
+              this.connecting = false;
+
+              /**
+               * CRITICAL:
+               *
+               * Stop microphone processing.
+               *
+               * Otherwise ScriptProcessorNode
+               * continues firing and tries to
+               * send audio into the CLOSED socket.
+               */
+              this.stopMicrophone();
+
+              /**
+               * Stop any Gemini audio currently
+               * playing.
+               */
+              this.stopOutputAudio();
+
+              /**
+               * Remove dead session reference.
+               */
+              this.session = null;
+
+              this.callbacks.onClose?.(
+                event,
+              );
+            },
           },
-        },
+
+          config: {
+            responseModalities: [
+              Modality.AUDIO,
+            ],
+
+            inputAudioTranscription: {},
+
+            outputAudioTranscription: {},
+
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: "Puck",
+                },
+              },
+            },
+
+            realtimeInputConfig: {
+              automaticActivityDetection: {
+                disabled: false,
+              },
+            },
+
+            systemInstruction: {
+              parts: [
+                {
+                  text: `
+You are Nova, a friendly real-time multilingual voice assistant.
+
+Always detect the language the user is currently speaking.
+
+English -> respond in English.
+
+Hindi -> respond in Hindi.
+
+Hinglish -> respond naturally in Hinglish.
+
+If the user switches language,
+immediately follow the new language.
+
+Do not ask the user to select a language.
+
+Keep responses natural, conversational,
+and reasonably short.
+
+Handle interruptions naturally.
+
+Maintain conversation context.
+
+Do not use markdown while speaking.
+`,
+                },
+              ],
+            },
+          },
+        });
+
+      this.session = session;
+
+      console.log(
+        "🟢 Gemini Live session created.",
       );
-    };
+    } catch (error) {
+      this.connected = false;
+      this.connecting = false;
+      this.session = null;
 
-    this.source.connect(
-      this.processor,
-    );
+      console.error(
+        "🔴 Gemini Live connection failed:",
+        error,
+      );
 
-    this.processor.connect(
-      this.silentGain,
-    );
+      this.callbacks.onError?.(
+        error,
+      );
 
-    this.silentGain.connect(
-      this.inputContext.destination,
-    );
-
-    console.log(
-      "Microphone started",
-    );
+      throw error;
+    }
   }
+
+  // ============================================================
+  // MESSAGE HANDLER
+  // ============================================================
 
   private handleMessage(
     message: any,
   ) {
-    console.log(
-      "Gemini message:",
+    this.callbacks.onMessage?.(
       message,
     );
 
@@ -623,328 +335,765 @@ You are Nova.
       return;
     }
 
-    /*
-     * USER INTERRUPTED NOVA
-     */
+    // ----------------------------------------------------------
+    // GEMINI WAS INTERRUPTED
+    // ----------------------------------------------------------
+
     if (
       serverContent.interrupted
     ) {
       console.log(
-        "User interrupted Nova",
+        "🟡 Gemini response interrupted.",
       );
 
-      this.stopAudioPlayback();
+      /**
+       * Immediately stop currently playing
+       * Nova audio.
+       */
+      this.stopOutputAudio();
 
       this.callbacks.onInterrupted?.();
 
       return;
     }
 
-    /*
-     * USER TRANSCRIPT
-     */
-    const inputTranscript =
-      serverContent
-        .inputTranscription
-        ?.text;
+    // ----------------------------------------------------------
+    // USER TRANSCRIPTION
+    // ----------------------------------------------------------
+
+    const inputTranscription =
+      serverContent.inputTranscription;
 
     if (
-      inputTranscript
+      inputTranscription?.text
     ) {
-      console.log(
-        "USER:",
-        inputTranscript,
-      );
-
-      this.callbacks.onInputTranscript?.(
-        inputTranscript,
+      this.callbacks.onUserTranscript?.(
+        inputTranscription.text,
       );
     }
 
-    /*
-     * NOVA TRANSCRIPT
-     */
-    const outputTranscript =
-      serverContent
-        .outputTranscription
-        ?.text;
+    // ----------------------------------------------------------
+    // NOVA TRANSCRIPTION
+    // ----------------------------------------------------------
+
+    const outputTranscription =
+      serverContent.outputTranscription;
 
     if (
-      outputTranscript
+      outputTranscription?.text
     ) {
-      console.log(
-        "NOVA:",
-        outputTranscript,
-      );
-
-      this.callbacks.onOutputTranscript?.(
-        outputTranscript,
+      this.callbacks.onAssistantTranscript?.(
+        outputTranscription.text,
       );
     }
 
-    /*
-     * MODEL AUDIO
-     */
-    const parts =
-      serverContent.modelTurn
-        ?.parts;
+    // ----------------------------------------------------------
+    // NOVA AUDIO
+    // ----------------------------------------------------------
 
-    if (parts) {
+    const modelTurn =
+      serverContent.modelTurn;
+
+    if (
+      modelTurn?.parts
+    ) {
       for (
-        const part of parts
+        const part of modelTurn.parts
       ) {
-        const audioData =
-          part?.inlineData?.data;
+        const inlineData =
+          part?.inlineData;
 
         if (
-          audioData
+          inlineData?.data
         ) {
-          console.log(
-            "🔊 NOVA AUDIO RECEIVED:",
-            audioData.length,
+          const audio =
+            inlineData.data;
+
+          this.callbacks.onAudio?.(
+            audio,
           );
 
-          this.callbacks.onAudioStart?.();
-
           this.playAudio(
-            audioData,
+            audio,
           );
         }
       }
     }
 
-    /*
-     * END OF NOVA TURN
-     */
+    // ----------------------------------------------------------
+    // TURN COMPLETE
+    // ----------------------------------------------------------
+
     if (
       serverContent.turnComplete
     ) {
-      console.log(
-        "Nova turn complete",
-      );
-
-      this.callbacks.onAudioEnd?.();
+      this.callbacks.onTurnComplete?.();
     }
   }
 
-  private async playAudio(
+  // ============================================================
+  // MICROPHONE
+  // ============================================================
+
+  async startMicrophone(): Promise<void> {
+    if (
+      !this.connected ||
+      !this.session
+    ) {
+      throw new Error(
+        "Gemini Live is not connected.",
+      );
+    }
+
+    /**
+     * Prevent duplicate microphone
+     * processors.
+     */
+    if (this.mediaStream) {
+      console.warn(
+        "Microphone is already running.",
+      );
+
+      return;
+    }
+
+    console.log(
+      "🎤 Starting microphone...",
+    );
+
+    this.mediaStream =
+      await navigator.mediaDevices.getUserMedia(
+        {
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        },
+      );
+
+    this.inputAudioContext =
+      new AudioContext();
+
+    await this.inputAudioContext.resume();
+
+    console.log(
+      "Input AudioContext sample rate:",
+      this.inputAudioContext.sampleRate,
+    );
+
+    this.mediaSource =
+      this.inputAudioContext.createMediaStreamSource(
+        this.mediaStream,
+      );
+
+    this.processor =
+      this.inputAudioContext.createScriptProcessor(
+        4096,
+        1,
+        1,
+      );
+
+    this.silentGain =
+      this.inputAudioContext.createGain();
+
+    /**
+     * We don't want microphone audio
+     * directly playing through speakers.
+     */
+    this.silentGain.gain.value = 0;
+
+    // ----------------------------------------------------------
+    // MICROPHONE AUDIO LOOP
+    // ----------------------------------------------------------
+
+    this.processor.onaudioprocess =
+      (event) => {
+        /**
+         * THIS IS THE MOST IMPORTANT GUARD.
+         *
+         * Once the WebSocket closes,
+         * this callback may still execute.
+         *
+         * Therefore we NEVER send audio unless
+         * the connection is currently alive.
+         */
+        if (
+          !this.connected ||
+          !this.session ||
+          this.disconnecting
+        ) {
+          return;
+        }
+
+        const input =
+          event.inputBuffer.getChannelData(
+            0,
+          );
+
+        const rms =
+          this.calculateRMS(input);
+
+        console.log(
+          "Mic RMS:",
+          rms.toFixed(5),
+        );
+
+        /**
+         * Ignore absolute silence.
+         */
+        if (
+          rms < 0.0001
+        ) {
+          return;
+        }
+
+        /**
+         * Browser microphone can be 44.1kHz
+         * or 48kHz.
+         *
+         * Gemini expects 16-bit PCM.
+         */
+        const pcm16 =
+          this.convertToPCM16(
+            input,
+            this.inputAudioContext!
+              .sampleRate,
+          );
+
+        const base64 =
+          this.arrayBufferToBase64(
+            pcm16,
+          );
+
+        this.sendAudio(
+          base64,
+        );
+      };
+
+    this.mediaSource.connect(
+      this.processor,
+    );
+
+    this.processor.connect(
+      this.silentGain,
+    );
+
+    this.silentGain.connect(
+      this.inputAudioContext.destination,
+    );
+
+    console.log(
+      "🟢 Microphone started.",
+    );
+  }
+
+  // ============================================================
+  // SEND AUDIO
+  // ============================================================
+
+  private sendAudio(
     base64Audio: string,
   ) {
-    if (
-      !this.outputContext
-    ) {
-      console.error(
-        "No output AudioContext",
-      );
-
-      return;
-    }
-
-    /*
-     * Make absolutely sure
-     * the browser is playing audio.
+    /**
+     * SECOND IMPORTANT GUARD.
+     *
+     * Even if something somehow reaches
+     * this function after the WebSocket closes,
+     * it cannot call Gemini.
      */
-    await this.resumeAudio();
-
-    const pcm =
-      base64ToPCM16(
-        base64Audio,
-      );
-
     if (
-      pcm.length === 0
+      !this.connected ||
+      !this.session ||
+      this.disconnecting
     ) {
       return;
     }
 
-    const audioBuffer =
-      this.outputContext.createBuffer(
-        1,
-        pcm.length,
-        OUTPUT_SAMPLE_RATE,
+    try {
+      this.session.sendRealtimeInput(
+        {
+          audio: {
+            data: base64Audio,
+            mimeType:
+              "audio/pcm;rate=16000",
+          },
+        },
+      );
+    } catch (error) {
+      /**
+       * If Gemini closes between our check
+       * and sendRealtimeInput(), don't create
+       * an endless error loop.
+       */
+      console.warn(
+        "Gemini connection closed while sending audio.",
       );
 
-    const channel =
-      audioBuffer.getChannelData(
-        0,
+      this.connected = false;
+
+      this.stopMicrophone();
+
+      this.callbacks.onError?.(
+        error,
+      );
+    }
+  }
+
+  // ============================================================
+  // RMS
+  // ============================================================
+
+  private calculateRMS(
+    data: Float32Array,
+  ): number {
+    let sum = 0;
+
+    for (
+      let i = 0;
+      i < data.length;
+      i++
+    ) {
+      sum +=
+        data[i] *
+        data[i];
+    }
+
+    return Math.sqrt(
+      sum / data.length,
+    );
+  }
+
+  // ============================================================
+  // PCM CONVERSION
+  // ============================================================
+
+  private convertToPCM16(
+    input: Float32Array,
+    inputSampleRate: number,
+  ): ArrayBuffer {
+    const targetSampleRate =
+      16000;
+
+    const ratio =
+      inputSampleRate /
+      targetSampleRate;
+
+    const outputLength =
+      Math.floor(
+        input.length /
+          ratio,
+      );
+
+    const output =
+      new Int16Array(
+        outputLength,
       );
 
     for (
       let i = 0;
-      i < pcm.length;
+      i < outputLength;
       i++
     ) {
-      channel[i] =
-        pcm[i] / 32768;
+      const index =
+        Math.floor(
+          i * ratio,
+        );
+
+      const sample =
+        Math.max(
+          -1,
+          Math.min(
+            1,
+            input[index],
+          ),
+        );
+
+      output[i] =
+        sample < 0
+          ? sample * 0x8000
+          : sample * 0x7fff;
     }
 
-    const source =
-      this.outputContext.createBufferSource();
-
-    source.buffer =
-      audioBuffer;
-
-    const gain =
-      this.outputContext.createGain();
-
-    gain.gain.value = 1.0;
-
-    source.connect(gain);
-
-    gain.connect(
-      this.outputContext.destination,
-    );
-
-    const now =
-      this.outputContext.currentTime;
-
-    /*
-     * If the queue fell behind,
-     * start immediately.
-     */
-    if (
-      this.nextAudioTime <
-      now
-    ) {
-      this.nextAudioTime =
-        now + 0.02;
-    }
-
-    source.start(
-      this.nextAudioTime,
-    );
-
-    this.nextAudioTime +=
-      audioBuffer.duration;
-
-    console.log(
-      "🔊 Playing Nova audio",
-      {
-        samples: pcm.length,
-        duration:
-          audioBuffer.duration,
-        context:
-          this.outputContext.state,
-      },
-    );
+    return output.buffer;
   }
 
-  private stopAudioPlayback() {
-    if (
-      !this.outputContext
-    ) {
-      return;
-    }
+  // ============================================================
+  // ARRAY BUFFER -> BASE64
+  // ============================================================
 
-    this.nextAudioTime =
-      this.outputContext.currentTime;
+  private arrayBufferToBase64(
+    buffer: ArrayBuffer,
+  ): string {
+    const bytes =
+      new Uint8Array(buffer);
 
-    console.log(
-      "Nova audio playback stopped",
-    );
-  }
+    let binary = "";
 
-  mute() {
-    if (
-      !this.mediaStream
-    ) {
-      return;
-    }
+    const chunkSize =
+      0x8000;
 
     for (
-      const track of
-      this.mediaStream.getAudioTracks()
+      let i = 0;
+      i < bytes.length;
+      i += chunkSize
     ) {
-      track.enabled = false;
+      const chunk =
+        bytes.subarray(
+          i,
+          Math.min(
+            i + chunkSize,
+            bytes.length,
+          ),
+        );
+
+      binary += String.fromCharCode(
+        ...chunk,
+      );
     }
 
-    console.log(
-      "Microphone muted",
-    );
+    return btoa(binary);
   }
 
-  unmute() {
-    if (
-      !this.mediaStream
-    ) {
-      return;
-    }
+  // ============================================================
+  // BASE64 -> ARRAY BUFFER
+  // ============================================================
 
-    for (
-      const track of
-      this.mediaStream.getAudioTracks()
-    ) {
-      track.enabled = true;
-    }
+  private base64ToArrayBuffer(
+    base64: string,
+  ): ArrayBuffer {
+    const binary =
+      atob(base64);
 
-    console.log(
-      "Microphone unmuted",
-    );
-  }
-
-  async disconnect() {
-    console.log(
-      "Disconnecting Nova...",
-    );
-
-    this.stopped = true;
-
-    try {
-      this.processor?.disconnect();
-    } catch {}
-
-    try {
-      this.source?.disconnect();
-    } catch {}
-
-    try {
-      this.silentGain?.disconnect();
-    } catch {}
-
-    this.mediaStream
-      ?.getTracks()
-      .forEach(
-        (track) => {
-          track.stop();
-        },
+    const bytes =
+      new Uint8Array(
+        binary.length,
       );
 
-    if (
-      this.inputContext &&
-      this.inputContext.state !==
-        "closed"
+    for (
+      let i = 0;
+      i < binary.length;
+      i++
     ) {
-      await this.inputContext.close();
+      bytes[i] =
+        binary.charCodeAt(i);
     }
 
-    if (
-      this.outputContext &&
-      this.outputContext.state !==
-        "closed"
-    ) {
-      await this.outputContext.close();
-    }
+    return bytes.buffer;
+  }
 
+  // ============================================================
+  // PLAY NOVA AUDIO
+  // ============================================================
+
+  private async playAudio(
+    base64Audio: string,
+  ) {
     try {
-      this.session?.close();
-    } catch {}
+      if (
+        !this.outputAudioContext
+      ) {
+        this.outputAudioContext =
+          new AudioContext({
+            sampleRate: 24000,
+          });
+      }
 
-    this.processor = null;
+      await this.outputAudioContext.resume();
 
-    this.source = null;
+      const pcmBuffer =
+        this.base64ToArrayBuffer(
+          base64Audio,
+        );
 
-    this.silentGain = null;
+      const int16 =
+        new Int16Array(
+          pcmBuffer,
+        );
 
-    this.mediaStream = null;
+      const audioBuffer =
+        this.outputAudioContext.createBuffer(
+          1,
+          int16.length,
+          24000,
+        );
 
-    this.inputContext = null;
+      const channel =
+        audioBuffer.getChannelData(
+          0,
+        );
 
-    this.outputContext = null;
+      for (
+        let i = 0;
+        i < int16.length;
+        i++
+      ) {
+        channel[i] =
+          int16[i] / 32768;
+      }
+
+      const source =
+        this.outputAudioContext.createBufferSource();
+
+      source.buffer =
+        audioBuffer;
+
+      source.connect(
+        this.outputAudioContext.destination,
+      );
+
+      const now =
+        this.outputAudioContext.currentTime;
+
+      if (
+        this.outputNextTime <
+        now
+      ) {
+        this.outputNextTime =
+          now;
+      }
+
+      source.start(
+        this.outputNextTime,
+      );
+
+      this.outputNextTime +=
+        audioBuffer.duration;
+
+      this.audioQueue.push(
+        source,
+      );
+
+      source.onended = () => {
+        const index =
+          this.audioQueue.indexOf(
+            source,
+          );
+
+        if (
+          index !== -1
+        ) {
+          this.audioQueue.splice(
+            index,
+            1,
+          );
+        }
+      };
+    } catch (error) {
+      console.error(
+        "Nova audio playback error:",
+        error,
+      );
+    }
+  }
+
+  // ============================================================
+  // STOP NOVA AUDIO
+  // ============================================================
+
+  private stopOutputAudio() {
+    for (
+      const source of this.audioQueue
+    ) {
+      try {
+        source.stop();
+      } catch {
+        // Already stopped.
+      }
+    }
+
+    this.audioQueue = [];
+
+    this.outputNextTime = 0;
+
+    if (
+      this.outputAudioContext
+    ) {
+      this.outputAudioContext
+        .close()
+        .catch(() => {});
+
+      this.outputAudioContext =
+        null;
+    }
+  }
+
+  // ============================================================
+  // STOP MICROPHONE
+  // ============================================================
+
+  stopMicrophone() {
+    console.log(
+      "🎤 Stopping microphone...",
+    );
+
+    /**
+     * FIRST:
+     * Stop the audio callback.
+     *
+     * This is what prevents the continuous
+     * sendRealtimeInput() loop.
+     */
+    if (this.processor) {
+      this.processor.onaudioprocess =
+        null;
+
+      try {
+        this.processor.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+
+      this.processor = null;
+    }
+
+    if (this.mediaSource) {
+      try {
+        this.mediaSource.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+
+      this.mediaSource = null;
+    }
+
+    if (this.silentGain) {
+      try {
+        this.silentGain.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+
+      this.silentGain = null;
+    }
+
+    /**
+     * Stop the actual browser microphone.
+     */
+    if (this.mediaStream) {
+      for (
+        const track of
+          this.mediaStream.getTracks()
+      ) {
+        track.stop();
+      }
+
+      this.mediaStream = null;
+    }
+
+    /**
+     * Close microphone AudioContext.
+     */
+    if (
+      this.inputAudioContext
+    ) {
+      this.inputAudioContext
+        .close()
+        .catch(() => {});
+
+      this.inputAudioContext =
+        null;
+    }
+
+    console.log(
+      "🟢 Microphone stopped.",
+    );
+  }
+
+  // ============================================================
+  // DISCONNECT
+  // ============================================================
+
+  async disconnect(): Promise<void> {
+    /**
+     * Prevent duplicate disconnect calls.
+     */
+    if (this.disconnecting) {
+      return;
+    }
+
+    this.disconnecting = true;
+
+    console.log(
+      "Disconnecting Gemini Live...",
+    );
+
+    /**
+     * IMPORTANT ORDER:
+     *
+     * 1. Stop microphone
+     * 2. Stop audio playback
+     * 3. Mark disconnected
+     * 4. Close WebSocket
+     */
+
+    this.stopMicrophone();
+
+    this.stopOutputAudio();
+
+    this.connected = false;
+
+    this.connecting = false;
+
+    if (this.session) {
+      try {
+        this.session.close();
+      } catch (error) {
+        console.warn(
+          "Gemini session was already closed.",
+          error,
+        );
+      }
+    }
 
     this.session = null;
 
+    this.disconnecting = false;
+
     console.log(
-      "Nova disconnected",
+      "Gemini Live disconnected.",
     );
+  }
+
+  // ============================================================
+  // STATUS
+  // ============================================================
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  // ============================================================
+  // SEND TEXT
+  // ============================================================
+
+  sendText(
+    text: string,
+  ) {
+    if (
+      !this.connected ||
+      !this.session ||
+      this.disconnecting
+    ) {
+      console.warn(
+        "Cannot send text. Gemini is not connected.",
+      );
+
+      return;
+    }
+
+    try {
+      this.session.sendRealtimeInput(
+        {
+          text,
+        },
+      );
+    } catch (error) {
+      console.error(
+        "Gemini text send failed:",
+        error,
+      );
+    }
   }
 }
