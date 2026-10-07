@@ -1,15 +1,9 @@
 node_modules/
-
+dist/
 .env
 .env.*
 !.env.example
 
-dist/
-build/
-
-.DS_Store
-
-.vscode/
-.idea/
-
+.vercel/
 *.log
+.DS_Store
